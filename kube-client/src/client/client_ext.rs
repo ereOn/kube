@@ -1,5 +1,5 @@
 use crate::{Client, Error, Result};
-use k8s_openapi::api::core::v1::Namespace as k8sNs;
+use k8s_openapi::api::core::v1::{Namespace as k8sNs, ObjectReference};
 use kube_core::{
     object::ObjectList,
     params::{GetParams, ListParams},
@@ -42,9 +42,65 @@ pub struct Cluster;
 /// You can create this directly, or convert `From` a `String` / `&str`, or `TryFrom` an `k8s_openapi::api::core::v1::Namespace`
 pub struct Namespace(String);
 
+/// How to get the url for an object
+///
+/// Pick one of `kube::client::Cluster` or `kube::client::Namespace`.
+pub trait Reference<K>: ObjectUrl<K> {
+    fn name(&self) -> Option<&str>;
+}
+
+/// Ref<K> stores a resolvable reference, which can be fetched by Client
+pub enum Ref<K: Resource> {
+    /// Namespace stores a reference to a namespace scoped resource
+    Namespace(ResourceRef<K>),
+    /// Cluster stores a reference to a cluster scoped resource
+    Cluster(ResourceRef<K>),
+}
+
+/// ResourceRef provides a resolvable reference to an arbitrary object
+pub struct ResourceRef<K: Resource> {
+    /// Type of the underlying object
+    pub dyntype: K::DynamicType,
+
+    /// Object reference
+    pub object_ref: ObjectReference,
+}
+
+impl<K> Ref<K>
+where
+    K: Resource,
+    K::DynamicType: Default,
+{
+    /// Construct a new Ref<K> from ObjectReference
+    pub fn new(object_ref: impl Into<Option<ObjectReference>>) -> Self {
+        let object_ref = Ref::<K>::resolve_ref(object_ref.into(), K::DynamicType::default()).unwrap_or_default();
+        match object_ref.namespace {
+            Some(_) => Self::Namespace(ResourceRef {
+                object_ref,
+                dyntype: K::DynamicType::default(),
+            }),
+            None => Self::Cluster(ResourceRef {
+                object_ref,
+                dyntype: K::DynamicType::default(),
+            }),
+        }
+    }
+
+    fn resolve_ref(object_ref: Option<ObjectReference>, dyntype: K::DynamicType) -> Option<ObjectReference> {
+        let object_ref = object_ref?;
+        if object_ref.api_version.clone()? == K::api_version(&dyntype)
+            && object_ref.kind.clone()? == K::kind(&dyntype)
+        {
+            None
+        } else {
+            Some(object_ref)
+        }
+    }
+}
+
 /// Scopes for `unstable-client` [`Client#impl-Client`] extension methods
 pub mod scope {
-    pub use super::{Cluster, Namespace};
+    pub use super::{Cluster, Namespace, Ref};
 }
 
 // All objects can be listed cluster-wide
@@ -90,6 +146,35 @@ where
 {
     fn url_path(&self) -> String {
         K::url_path(&K::DynamicType::default(), Some(&self.0))
+    }
+}
+
+impl<K> ObjectUrl<K> for Ref<K>
+where
+    K: Resource,
+    K::DynamicType: Default,
+{
+    fn url_path(&self) -> String {
+        K::url_path(
+            &K::DynamicType::default(),
+            match self {
+                Ref::Namespace(ns) => ns.object_ref.namespace.as_deref(),
+                Ref::Cluster(_) => None,
+            },
+        )
+    }
+}
+
+impl<K> Reference<K> for Ref<K>
+where
+    K: Resource,
+    K::DynamicType: Default,
+{
+    fn name(&self) -> Option<&str> {
+        match self {
+            Ref::Namespace(ns) => ns.object_ref.name.as_deref(),
+            Ref::Cluster(cl) => cl.object_ref.name.as_deref(),
+        }
     }
 }
 
@@ -179,6 +264,39 @@ impl Client {
     {
         let mut req = Request::new(scope.url_path())
             .get(name, &GetParams::default())
+            .map_err(Error::BuildRequest)?;
+        req.extensions_mut().insert("get");
+        self.request::<K>(req).await
+    }
+
+    /// Fetch a single instance of a `Resource` from a provided reference.
+    ///
+    /// ```no_run
+    /// # use k8s_openapi::api::rbac::v1::ClusterRole;
+    /// # use k8s_openapi::api::core::v1::Service;
+    /// # use kube::client::scope::{Cluster, Namespace};
+    /// # use kube::{ResourceExt, api::GetParams};
+    /// # async fn wrapper() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client: kube::Client = todo!();
+    /// let cr = client.get::<ClusterRole>("cluster-admin", &Cluster).await?;
+    /// assert_eq!(cr.name_unchecked(), "cluster-admin");
+    /// let svc = client.get::<Service>("kubernetes", &Namespace::from("default")).await?;
+    /// assert_eq!(svc.name_unchecked(), "kubernetes");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn fetch<K>(&self, reference: &impl Reference<K>) -> Result<K>
+    where
+        K: Resource + Serialize + DeserializeOwned + Clone + Debug,
+        <K as Resource>::DynamicType: Default,
+    {
+        let mut req = Request::new(reference.url_path())
+            .get(
+                reference
+                    .name()
+                    .ok_or(Error::RefResolve("Reference missing name".to_string()))?,
+                &GetParams::default(),
+            )
             .map_err(Error::BuildRequest)?;
         req.extensions_mut().insert("get");
         self.request::<K>(req).await
