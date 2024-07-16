@@ -244,7 +244,7 @@ pub enum NamespaceError {
 /// # use k8s_openapi::api::core::v1::Pod;
 /// # use k8s_openapi::api::core::v1::Service;
 /// # use kube::client::scope::{Namespace, Cluster};
-/// # use kube::prelude::*;
+/// # use kube_client::prelude::*;
 /// # use kube::api::ListParams;
 /// # async fn wrapper() -> Result<(), Box<dyn std::error::Error>> {
 /// # let client: kube::Client = todo!();
@@ -266,7 +266,7 @@ impl Client {
     /// # use k8s_openapi::api::rbac::v1::ClusterRole;
     /// # use k8s_openapi::api::core::v1::Service;
     /// # use kube::client::scope::{Namespace, Cluster};
-    /// # use kube::prelude::*;
+    /// # use kube_client::prelude::*;
     /// # use kube::api::GetParams;
     /// # async fn wrapper() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client: kube::Client = todo!();
@@ -299,7 +299,7 @@ impl Client {
     /// # use k8s_openapi::api::core::v1::LocalObjectReference;
     /// # use k8s_openapi::api::core::v1::{Node, Pod};
     /// # use kube::api::GetParams;
-    /// # use kube::prelude::*;
+    /// # use kube_client::prelude::*;
     /// # use kube::api::DynamicObject;
     /// # async fn wrapper() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client: kube::Client = todo!();
@@ -358,7 +358,7 @@ impl Client {
     /// # use k8s_openapi::api::core::v1::Pod;
     /// # use k8s_openapi::api::core::v1::Service;
     /// # use kube::client::scope::{Namespace, Cluster};
-    /// # use kube::prelude::*;
+    /// # use kube_client::prelude::*;
     /// # use kube::api::ListParams;
     /// # async fn wrapper() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client: kube::Client = todo!();
@@ -375,7 +375,6 @@ impl Client {
     pub async fn list<K>(&self, lp: &ListParams, scope: &impl CollectionUrl<K>) -> Result<ObjectList<K>>
     where
         K: Resource + Serialize + DeserializeOwned + Clone + Debug,
-        <K as Resource>::DynamicType: Default,
     {
         let mut req = Request::new(scope.url_path())
             .list(lp)
@@ -399,6 +398,67 @@ fn url_path(r: &ApiResource, namespace: Option<String>) -> String {
         namespaces = n,
         plural = r.plural
     )
+}
+
+#[derive(thiserror::Error, Debug)]
+/// Failures to infer a namespace
+pub enum ParserError {
+    /// Parse
+    #[error("Unable to parse value {0}")]
+    Parse(Box<dyn std::error::Error>),
+}
+
+/// Helper trait for getting [`kube::Api`] instances for a Kubernetes resource's scope
+///
+/// Not intended to be implemented manually, it is blanket-implemented for all types that implement [`Resource`]
+/// for either the [namespace](`NamespaceResourceScope`) or [cluster](`ClusterResourceScope`) scopes.
+trait BidirectionalParser: Sized {
+    /// The namespace type for `Self`'s scope.
+    ///
+    /// This will be [`str`] for namespaced resource, and [`()`] for cluster-scoped resources.
+    type Value: ?Sized;
+    /// Get the namespace of `Self`.
+    fn parse(&self) -> &Self::Value;
+}
+
+impl<V, T> BidirectionalParser for T
+where
+    T: ItemParser<Value = V>,
+{
+    type Value = T::Value;
+
+    fn parse(&self) -> &Self::Value {
+        T::parse(self)
+    }
+}
+
+#[doc(hidden)]
+// Workaround for https://github.com/rust-lang/rust/issues/20400
+pub trait ItemParser {
+    type Value: ?Sized;
+    fn parse(res: &Self) -> &Self::Value;
+}
+
+impl<K> ItemParser for (K, NamespaceResourceScope)
+where
+    K: Resource<Scope = NamespaceResourceScope>,
+{
+    type Value = str;
+
+    fn parse(res: &Self) -> &Self::Value {
+        ""
+    }
+}
+
+impl<K> ItemParser for (K, ClusterResourceScope)
+where
+    K: Resource<Scope = ClusterResourceScope>,
+{
+    type Value = ();
+
+    fn parse(_res: &Self) -> &Self::Value {
+        &()
+    }
 }
 
 #[cfg(test)]
