@@ -1,16 +1,14 @@
 use crate::{Client, Error, Result};
 use k8s_openapi::{
-    api::{
-        core::v1::{LocalObjectReference, Namespace as k8sNs, ObjectReference},
-    },
+    api::core::v1::{LocalObjectReference, Namespace as k8sNs, ObjectReference},
     apimachinery::pkg::apis::meta::v1::OwnerReference,
 };
 use kube_core::{
     object::ObjectList,
     params::{GetParams, ListParams, Patch, PatchParams},
     request::Request,
-    ApiResource, ClusterResourceScope, DynamicResourceScope, NamespaceResourceScope, ObjectMeta, Resource,
-    ResourceExt,
+    ApiResource, ClusterResourceScope, DynamicResourceScope, NamespaceResourceScope, Resource, ResourceExt,
+    TypeMeta,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
@@ -233,6 +231,18 @@ pub enum NamespaceError {
     MissingName,
 }
 
+#[derive(Serialize, Clone, Debug)]
+/// ApplyObject allows to wrap an object into Patch::Apply compatible structure,
+/// with populated TypeMeta.
+pub struct ApplyObject<R: Serialize> {
+    /// Contains the API version and type of the request.
+    #[serde(flatten)]
+    pub types: TypeMeta,
+    /// Contains the object data.
+    #[serde(flatten)]
+    pub data: R,
+}
+
 /// Generic client extensions for the `unstable-client` feature
 ///
 /// These methods allow users to query across a wide-array of resources without needing
@@ -414,10 +424,17 @@ impl Client {
         let url = K::url_path(&Default::default(), meta.namespace.as_deref());
         let req = Request::new(url);
 
-        let mut resource = resource.clone();
-        resource.meta_mut().managed_fields = None;
-        let patch = &Patch::Apply(resource);
-        let req = req.patch(name, pp, patch).map_err(Error::BuildRequest)?;
+        let apply = ApplyObject::<K> {
+            types: TypeMeta::resource::<K>(),
+            data: {
+                let mut resource = resource.clone();
+                resource.meta_mut().managed_fields = None;
+                resource
+            },
+        };
+        let req = req
+            .patch(name, pp, &Patch::Apply(apply))
+            .map_err(Error::BuildRequest)?;
         self.request::<K>(req).await
     }
 
@@ -448,11 +465,16 @@ impl Client {
         let url = K::url_path(&Default::default(), meta.namespace.as_deref());
         let req = Request::new(url);
 
-        let mut resource = resource.clone();
-        resource.meta_mut().managed_fields = None;
-        let patch = &Patch::Apply(resource);
+        let apply = ApplyObject::<K> {
+            types: TypeMeta::resource::<K>(),
+            data: {
+                let mut resource = resource.clone();
+                resource.meta_mut().managed_fields = None;
+                resource
+            },
+        };
         let req = req
-            .patch_subresource("status", name, pp, patch)
+            .patch_subresource("status", name, pp, &Patch::Apply(apply))
             .map_err(Error::BuildRequest)?;
         self.request::<K>(req).await
     }
