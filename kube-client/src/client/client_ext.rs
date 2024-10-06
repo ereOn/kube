@@ -400,7 +400,7 @@ impl Client {
     /// Perform apply patch on the provided `Resource` implementing type `K`
     ///
     /// ```no_run
-    /// # use k8s_openapi::api::core::v1::;
+    /// # use k8s_openapi::api::core::v1::Pod;
     /// # use k8s_openapi::api::core::v1::Service;
     /// # use kube::client::scope::Namespace;
     /// # use kube::prelude::*;
@@ -414,7 +414,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn apply<K, P: Serialize + Debug>(&self, resource: &K, pp: &PatchParams) -> Result<K>
+    pub async fn apply<K>(&self, resource: &K, pp: &PatchParams) -> Result<K>
     where
         K: ResourceExt + Serialize + DeserializeOwned + Clone + Debug,
         <K as Resource>::DynamicType: Default,
@@ -455,7 +455,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn apply_status<K, P: Serialize + Debug>(&self, resource: &K, pp: &PatchParams) -> Result<K>
+    pub async fn apply_status<K>(&self, resource: &K, pp: &PatchParams) -> Result<K>
     where
         K: ResourceExt + Serialize + DeserializeOwned + Clone + Debug,
         <K as Resource>::DynamicType: Default,
