@@ -25,6 +25,9 @@ pub use dynamic::{ApiResource, DynamicObject};
 pub mod crd;
 pub use crd::CustomResourceExt;
 
+pub mod validation;
+pub use validation::{validate, Message, Reason, Rule};
+
 pub mod gvk;
 pub use gvk::{GroupVersion, GroupVersionKind, GroupVersionResource};
 

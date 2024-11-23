@@ -6,11 +6,9 @@ use kube::{
         Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams,
         WatchEvent, WatchParams,
     },
-    cel_validation,
     runtime::wait::{await_condition, conditions},
-    Client, CustomResource, CustomResourceExt,
+    Client, CustomResource, CustomResourceExt, Validated,
 };
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // This example shows how the generated schema affects defaulting and validation.
@@ -20,8 +18,7 @@ use serde::{Deserialize, Serialize};
 // - https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#defaulting
 // - https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#defaulting-and-nullable
 
-#[cel_validation(struct_name = "FooSpecValidation")]
-#[derive(CustomResource, Serialize, Deserialize, Default, Debug, PartialEq, Eq, Clone, JsonSchema)]
+#[derive(CustomResource, Validated, Serialize, Deserialize, Default, Debug, PartialEq, Eq, Clone)]
 #[kube(
     group = "clux.dev",
     version = "v1",
@@ -30,6 +27,7 @@ use serde::{Deserialize, Serialize};
     derive = "PartialEq",
     derive = "Default"
 )]
+#[validated(mod_name = FooSpecCEL)]
 pub struct FooSpec {
     // Non-nullable without default is required.
     //
@@ -87,10 +85,12 @@ pub struct FooSpec {
     #[serde(default)]
     #[schemars(schema_with = "set_listable_schema")]
     set_listable: Vec<u32>,
+
     // Field with CEL validation
     #[serde(default)]
-    #[validated(rule = "self != 'illegal'", message_expression = "'string cannot be illegal'")]
-    #[validated(rule = "self != 'not legal'")]
+    #[validated(rule = "self != 'illegal'", message = Expression("'string cannot be illegal'".into()), reason = FieldValueForbidden)]
+    #[validated(rule = "self != 'not legal'", reason = FieldValueInvalid)]
+    #[schemars(schema_with = "FooSpecCEL::cel_validated")]
     cel_validated: Option<String>,
 }
 // https://kubernetes.io/docs/reference/using-api/server-side-apply/#merge-strategy
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
     println!("Creating CRD v1");
     let client = Client::try_default().await?;
     delete_crd(client.clone()).await?;
-    assert!(dbg!(create_crd(client.clone()).await).is_ok());
+    assert!(create_crd(client.clone()).await.is_ok());
 
     // Test creating Foo resource.
     let foos = Api::<Foo>::default_namespaced(client.clone());
@@ -133,25 +133,28 @@ async fn main() -> Result<()> {
     // Nullables defaults to `None` and only sent if it's not configured to skip.
     let bar = Foo::new("bar", FooSpec { ..FooSpec::default() });
     let bar = foos.create(&PostParams::default(), &bar).await?;
-    assert_eq!(bar.spec, FooSpec {
-        // Nonnullable without default is required.
-        non_nullable: String::default(),
-        // Defaulting didn't happen because an empty string was sent.
-        non_nullable_with_default: String::default(),
-        // `nullable_skipped` field does not exist in the object (see below).
-        nullable_skipped: None,
-        // `nullable` field exists in the object (see below).
-        nullable: None,
-        // Defaulting happened because serialization was skipped.
-        nullable_skipped_with_default: default_nullable(),
-        // Defaulting did not happen because `null` was sent.
-        // Deserialization does not apply the default either.
-        nullable_with_default: None,
-        // Empty listables to be patched in later
-        default_listable: Default::default(),
-        set_listable: Default::default(),
-        cel_validated: Default::default(),
-    });
+    assert_eq!(
+        bar.spec,
+        FooSpec {
+            // Nonnullable without default is required.
+            non_nullable: String::default(),
+            // Defaulting didn't happen because an empty string was sent.
+            non_nullable_with_default: String::default(),
+            // `nullable_skipped` field does not exist in the object (see below).
+            nullable_skipped: None,
+            // `nullable` field exists in the object (see below).
+            nullable: None,
+            // Defaulting happened because serialization was skipped.
+            nullable_skipped_with_default: default_nullable(),
+            // Defaulting did not happen because `null` was sent.
+            // Deserialization does not apply the default either.
+            nullable_with_default: None,
+            // Empty listables to be patched in later
+            default_listable: Default::default(),
+            set_listable: Default::default(),
+            cel_validated: Default::default(),
+        }
+    );
 
     // Set up dynamic resource to test using raw values.
     let gvk = GroupVersionKind::gvk("clux.dev", "v1", "Foo");
@@ -234,7 +237,7 @@ async fn main() -> Result<()> {
             assert_eq!(err.reason, "Invalid");
             assert_eq!(err.status, "Failure");
             assert!(err.message.contains("Foo.clux.dev \"baz\" is invalid"));
-            assert!(err.message.contains("spec.cel_validated: Invalid value"));
+            assert!(err.message.contains("spec.cel_validated: Forbidden"));
             assert!(err.message.contains("string cannot be illegal"));
         }
         _ => panic!(),
