@@ -330,8 +330,8 @@ pub fn derive_custom_resource(input: proc_macro::TokenStream) -> proc_macro::Tok
 /// #[derive(CustomResource, Validated, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 /// #[kube(group = "kube.rs", version = "v1", kind = "Struct")]
 /// struct MyStruct {
-///     #[validated(rule = "self != ''", message = Message("failure message".into()))]
-///     #[schemars(schema_with = "MyStructCEL::field")]
+///     #[validated(rule = Rule{rule: "self != ''".into(), message: Some("failure message".into()), ..Default::default()})]
+///     #[schemars(schema_with = "field")]
 ///     field: String,
 /// }
 ///
@@ -340,9 +340,7 @@ pub fn derive_custom_resource(input: proc_macro::TokenStream) -> proc_macro::Tok
 /// assert!(serde_json::to_string(&Struct::crd()).unwrap().contains(r#""message":"failure message""#));
 /// ```
 #[proc_macro_derive(Validated, attributes(validated, schemars))]
-pub fn derive_validated(
-    input: proc_macro::TokenStream,
-) -> proc_macro::TokenStream {
+pub fn derive_validated(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     custom_resource::derive_validated(input.into()).into()
 }
 
