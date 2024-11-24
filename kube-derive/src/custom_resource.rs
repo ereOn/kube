@@ -7,7 +7,10 @@ use darling::{
 };
 use proc_macro2::{Ident, Literal, Span, TokenStream};
 use quote::ToTokens;
-use syn::{parse_quote, spanned::Spanned, Data, DeriveInput, Expr, ExprCall, Path, Visibility};
+use syn::{
+    parse::Parser as _, parse_quote, spanned::Spanned, Attribute, Data, DeriveInput, Expr, ExprCall, Path,
+    Visibility,
+};
 
 /// Values we can parse from #[kube(attrs)]
 #[derive(Debug, FromDeriveInput)]
@@ -575,21 +578,22 @@ pub(crate) fn derive_validated(input: TokenStream) -> TokenStream {
         Ok(di) => di,
     };
 
-    let settings = match CELSettings::from_derive_input(&ast) {
+    let CELSettings {
+        mod_name,
+        ident,
+        crates: Crates {
+            kube_core, schemars, ..
+        },
+    } = match CELSettings::from_derive_input(&ast) {
         Err(err) => return err.write_errors(),
         Ok(attrs) => attrs,
     };
 
-    // Create a struct name for added validation rules, following the original struct name + "CEL"
-    let mod_name = settings
-        .mod_name
+    // Create a struct name for added validation rules, following the lowercase struct name + "cel"
+    let mod_name = mod_name
         .map(|p| path_to_string(&p))
-        .unwrap_or(settings.ident.to_string() + "CEL");
+        .unwrap_or(ident.to_string().to_lowercase() + "cel");
     let validation_mod = Ident::new(&mod_name, Span::call_site());
-
-    let Crates {
-        kube_core, schemars, ..
-    } = settings.crates;
 
     let mut validations: Vec<TokenStream> = vec![];
 
@@ -598,32 +602,28 @@ pub(crate) fn derive_validated(input: TokenStream) -> TokenStream {
         _ => return quote! {},
     };
 
-    let fields = match &struct_data.fields {
-        syn::Fields::Named(fields_named) => fields_named,
-        _ => return quote! {},
-    };
-
-    for field in fields.named.iter() {
-        let validation_method_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
-        let mut rules = vec![];
-        for attr in field
-            .attrs
-            .iter()
-            .filter(|attr| attr.path().is_ident("validated"))
-        {
-            let Rule {
-                rule,
-                message,
-                field_path,
-                reason,
-                manual,
-            } = match Rule::from_attributes(&vec![attr.clone()]) {
-                Ok(cel) => cel,
-                Err(e) => return e.with_span(&attr.meta).write_errors(),
-            };
-            if manual {
-                let validator = mod_name.clone() + "::" + &validation_method_name;
-                match ValidateSchemars::from_attributes(&field.attrs) {
+    if let syn::Fields::Named(fields) = &mut struct_data.fields {
+        for field in &mut fields.named {
+            let validation_method_name = field.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+            let validator = mod_name.clone() + "::" + &validation_method_name;
+            let mut rules = vec![];
+            for attr in field
+                .attrs
+                .iter()
+                .filter(|attr| attr.path().is_ident("validated"))
+            {
+                let Rule {
+                    rule,
+                    message,
+                    field_path,
+                    reason,
+                    manual,
+                } = match Rule::from_attributes(&vec![attr.clone()]) {
+                    Ok(cel) => cel,
+                    Err(e) => return e.with_span(&attr.meta).write_errors(),
+                };
+                if manual {
+                    match ValidateSchemars::from_attributes(&field.attrs) {
                     Ok(schemars_attr) if schemars_attr.schema_with != validator => return syn::Error::new(
                         attr.path().span(),
                         format!(
@@ -634,43 +634,81 @@ pub(crate) fn derive_validated(input: TokenStream) -> TokenStream {
                     Err(e) => return e.with_span(&attr.meta).write_errors(),
                     _ => (),
                 }
+                }
+                let message = message
+                    .map(|msg| quote! { message: Some(#kube_core::Message::#msg), })
+                    .unwrap_or_default();
+                let reason = reason
+                    .map(|r| quote! { reason: Some(#kube_core::Reason::#r), })
+                    .unwrap_or_default();
+                let path = field_path
+                    .map(|p| quote! { field_path: Some(#p.to_string()), })
+                    .unwrap_or_default();
+                rules.push(quote! {#kube_core::Rule{
+                    rule: #rule.to_string(),
+                    #reason
+                    #path
+                    #message
+                    ..Default::default()
+                },});
             }
-            let message = message
-                .map(|msg| quote! { message: Some(#kube_core::Message::#msg), })
-                .unwrap_or_default();
-            let reason = reason
-                .map(|r| quote! { reason: Some(#kube_core::Reason::#r), })
-                .unwrap_or_default();
-            let path = field_path
-                .map(|p| quote! { field_path: Some(#p.to_string()), })
-                .unwrap_or_default();
-            rules.push(quote! {#kube_core::Rule{
-                rule: #rule.to_string(),
-                #reason
-                #path
-                #message
-                ..Default::default()
-            },});
-        }
 
-        if rules.is_empty() {
-            continue;
-        }
-
-        let name = Ident::new(&validation_method_name, Span::call_site());
-        let field_type = &field.ty;
-
-        validations.push(quote! {
-            pub fn #name(gen: &mut #schemars::gen::SchemaGenerator) -> #schemars::schema::Schema {
-                let rules = [#(#rules)*];
-                #kube_core::validate(&mut gen.subschema_for::<#field_type>(), rules.to_vec()).unwrap()
+            if rules.is_empty() {
+                continue;
             }
-        });
+
+            field.attrs = field
+                .attrs
+                .clone()
+                .into_iter()
+                .filter(|attr| !attr.path().is_ident("validated"))
+                .collect();
+
+            let new_serde_attr = quote! {
+                #[schemars(schema_with = #validator)]
+            };
+
+            let parser = Attribute::parse_outer;
+            match parser.parse2(new_serde_attr) {
+                Ok(ref mut parsed) => field.attrs.append(parsed),
+                Err(e) => return e.to_compile_error(),
+            };
+
+            let name = Ident::new(&validation_method_name, Span::call_site());
+            let field_type = &field.ty;
+
+            validations.push(quote! {
+                #[automatically_derived]
+                pub fn #name(gen: &mut #schemars::gen::SchemaGenerator) -> #schemars::schema::Schema {
+                    let rules = [#(#rules)*];
+                    #kube_core::validate(&mut gen.subschema_for::<#field_type>(), rules.to_vec()).unwrap()
+                }
+            });
+        }
     }
+
+    ast.attrs = vec![];
+    ast.ident = Ident::new("Validation", Span::call_site());
 
     quote! {
         mod #validation_mod {
+            use super::*;
+
             #(#validations)*
+
+            #[derive(#schemars::JsonSchema)]
+            #[allow(dead_code)]
+            #ast
+        }
+
+        impl #schemars::JsonSchema for #ident {
+            fn schema_name() -> String {
+                #validation_mod::Validation::schema_name()
+            }
+
+            fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+                #validation_mod::Validation::json_schema(gen)
+            }
         }
     }
 }

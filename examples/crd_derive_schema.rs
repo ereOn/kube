@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
     derive = "PartialEq",
     derive = "Default"
 )]
-#[validated(mod_name = FooSpecCEL)]
+#[validated(mod_name = foo_spec_cel)]
 pub struct FooSpec {
     // Non-nullable without default is required.
     //
@@ -87,10 +87,9 @@ pub struct FooSpec {
     set_listable: Vec<u32>,
 
     // Field with CEL validation
-    #[serde(default)]
+    #[serde(default = "default_nullable")]
     #[validated(rule = "self != 'illegal'", message = Expression("'string cannot be illegal'".into()), reason = FieldValueForbidden)]
     #[validated(rule = "self != 'not legal'", reason = FieldValueInvalid)]
-    #[schemars(schema_with = "FooSpecCEL::cel_validated")]
     cel_validated: Option<String>,
 }
 // https://kubernetes.io/docs/reference/using-api/server-side-apply/#merge-strategy
