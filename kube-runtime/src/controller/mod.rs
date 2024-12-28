@@ -513,7 +513,7 @@ where
 }
 
 /// Accumulates all options that can be used on a [`Controller`] invocation.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Config {
     debounce: Duration,
     concurrency: u16,
@@ -549,6 +549,15 @@ impl Config {
     pub fn concurrency(mut self, concurrency: u16) -> Self {
         self.concurrency = concurrency;
         self
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            concurrency: std::cmp::min(2, num_cpus::get() as u16),
+            debounce: Default::default(),
+        }
     }
 }
 
