@@ -71,6 +71,10 @@ name = "crd_api"
 path = "crd_api.rs"
 
 [[example]]
+name = "fleet_addon_config"
+path = "fleet_addon_config.rs"
+
+[[example]]
 name = "crd_apply"
 path = "crd_apply.rs"
 
